@@ -10,8 +10,6 @@ import (
 	"io"
 	"sync"
 	"time"
-
-	merrors "github.com/phsm/multiplex/errors"
 )
 
 const (
@@ -219,7 +217,7 @@ func (m *Multiplex) Serve() error {
 	for {
 		select {
 		case <-m.ctx.Done():
-			err := merrors.NewErrorContextDone("reader context is done")
+			err := NewErrorContextDone("reader context is done")
 			m.reportError(err)
 			return err
 		default:
@@ -250,7 +248,7 @@ func (m *Multiplex) Serve() error {
 			// if not: the reader is slow, we dont write any data to him
 			freeSlots := cap(w.queue) - len(w.queue)
 			if freeSlots < 2 { // we always reserve 1 slot for EOF message (-1)
-				m.reportError(merrors.NewErrorWriterSlow(id))
+				m.reportError(NewErrorWriterSlow(id))
 				return true // return true here is an equivalent of 'continue' statement in forloop
 			}
 			w.stats.reportQueueLength(len(w.queue))
@@ -312,7 +310,7 @@ func (m *Multiplex) Write(id string, w io.Writer) error {
 		// or bucket number is received. Else we just reading the channel
 		select {
 		case <-ctx.Done():
-			err := merrors.NewErrorContextDone(fmt.Sprintf("writer %s: context is done", id))
+			err := NewErrorContextDone(fmt.Sprintf("writer %s: context is done", id))
 			m.reportError(err)
 			return err
 		case bucketNo = <-ws.queue:
@@ -327,7 +325,7 @@ func (m *Multiplex) Write(id string, w io.Writer) error {
 		// just for the sake of readability, saving couple of CPU cycles
 		numBytes, err := w.Write(m.buf[bucketNo].payload[:m.buf[bucketNo].numBytes])
 		if err != nil {
-			errWrite := merrors.NewErrorWrite(id, err.Error())
+			errWrite := NewErrorWrite(id, err.Error())
 			m.reportError(errWrite)
 			return errWrite
 		}
