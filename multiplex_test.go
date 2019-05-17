@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.nek0.net/phsm/multiplex"
-	merrors "gitlab.nek0.net/phsm/multiplex/errors"
+	"github.com/phsm/multiplex"
+	merrors "github.com/phsm/multiplex/errors"
 )
 
 const (

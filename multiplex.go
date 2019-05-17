@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	merrors "gitlab.nek0.net/phsm/multiplex/errors"
+	merrors "github.com/phsm/multiplex/errors"
 )
 
 const (
