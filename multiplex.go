@@ -1,4 +1,4 @@
-// Package multiplex provides a thread-safe solution to copy one io.Reader to multiple io.Writers.
+// Package multiplex provides a thread-safe solution to copy data stream from one io.Reader to multiple io.Writers.
 // io.Writers can be added and removed on the fly by using Write() and RemoveWriter functions.
 // It tracks and reports slow writers (e.g. those not being able to handle all the stream data).
 package multiplex
@@ -59,7 +59,7 @@ type writerStats struct {
 	statsMu          sync.RWMutex
 }
 
-func NewWriterStats() writerStats {
+func newWriterStats() writerStats {
 	return writerStats{
 		statsMu:   sync.RWMutex{},
 		startedAt: time.Now(),
@@ -126,17 +126,17 @@ type Multiplex struct {
 	writers *sync.Map
 
 	// This waitgroup is used when the reader is stopping by some reason (usually due to EOF).
-	// It is used to wait all writers to finish writing
+	// It is used to wait all writers to finish writing.
 	writersWg sync.WaitGroup
 
 	writersCount   uint32
 	writersCountMu sync.RWMutex
 
-	// if true, stop everything when no writers left
+	// if true, stop everything when no writers left.
 	stopWhenNoWritersLeft bool
 
 	// Errors channel. All errors are copied here, so you can read errors from outside.
-	// It is handy when you have non-fatal errors such as "writer became slow"
+	// It is handy when you have non-fatal errors such as "writer became slow".
 	Errors chan error
 
 	// Callback functions
@@ -274,7 +274,7 @@ func (m *Multiplex) Write(id string, w io.Writer) error {
 	defer m.OnWriterStopCallback()
 	// the writer struct with the queue and the cancel function
 	ws := new(writer)
-	ws.stats = NewWriterStats()
+	ws.stats = newWriterStats()
 
 	// here we derive a child context with cancel function and store the function in the writer struct
 	// so RemoveWriter can trigger the writer shutdown

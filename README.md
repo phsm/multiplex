@@ -12,3 +12,7 @@ Multiplex is a thread-safe Golang library which allows reading data from single 
 
 ## Possible use-cases
 Restreaming live video from single stream to multiple clients (e.g. via Golang's built-in HTTP server)
+
+## Quickstart
+Here is an example of using Multiplex to build an HTTP MPEG-TS streamer, grabbing the origin video stream from multicast UDP.
+https://github.com/phsm/multiplex/blob/master/examples/mpegts_http_streamer.go
