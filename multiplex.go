@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,6 +28,8 @@ const (
 
 	// Errors channel buffer size
 	errorsChanSize = 1000
+
+	ringBufferSize = 8 * 1024 * 1024 // 8mbytes
 )
 
 // Structure of each bucket in the ring. We store our data chunks here
@@ -53,7 +56,7 @@ func (w *writer) MarshalJSON() ([]byte, error) {
 
 type writerStats struct {
 	bytesTransmitted uint64
-	queueLength      int
+	queueLength      uint32
 	isSlow           bool
 	startedAt        time.Time
 	statsMu          sync.RWMutex
@@ -72,7 +75,7 @@ func (w *writerStats) reportTransmittedBytes(bytes int) {
 	w.bytesTransmitted += uint64(bytes)
 }
 
-func (w *writerStats) reportQueueLength(q int) {
+func (w *writerStats) reportQueueLength(q uint32) {
 	w.statsMu.Lock()
 	defer w.statsMu.Unlock()
 
@@ -85,7 +88,7 @@ func (w *writerStats) reportQueueLength(q int) {
 	}
 }
 
-func (w *writerStats) Stats() (startedAt time.Time, bytesTransmitted uint64, queueLength int, isSlow bool) {
+func (w *writerStats) Stats() (startedAt time.Time, bytesTransmitted uint64, queueLength uint32, isSlow bool) {
 	w.statsMu.RLock()
 	defer w.statsMu.RUnlock()
 
@@ -116,14 +119,13 @@ func (w *writerStats) MarshalJSON() ([]byte, error) {
 // As an arguments pass a Context, and io.Reader instance
 // Add or remove some io.Writer`s with Multiplex.AddWriter or Multiplex.RemoveWriter
 type Multiplex struct {
-	ctx    context.Context         // everything stops if this context is done/cancelled
-	cancel context.CancelFunc      // run it to cancel everything
-	reader io.Reader               // the reader we read data from
-	buf    [bufBucketsCount]bucket // this array (its not a slice!) hold buckets with data
+	ctx    context.Context      // everything stops if this context is done/cancelled
+	cancel context.CancelFunc   // run it to cancel everything
+	reader io.Reader            // the reader we read data from
+	buf    [ringBufferSize]byte // this array (its not a slice!) hold buckets with data
 
-	// Thread safe map. It holds ID of the client (string) -> *writer struct.
-	// We iterate over it, sending the bucket number we read data to
-	writers *sync.Map
+	cond           *sync.Cond
+	readerPosition uint32
 
 	// This waitgroup is used when the reader is stopping by some reason (usually due to EOF).
 	// It is used to wait all writers to finish writing.
@@ -153,19 +155,6 @@ func (m *Multiplex) MarshalJSON() ([]byte, error) {
 	defer m.marshallJSONMu.Unlock()
 	retval := make(map[string]interface{})
 	retval["started_at"] = m.startedAt
-	retval["queue_capacity"] = bufBucketsCount
-
-	writers := make(map[string]*writer)
-
-	m.writers.Range(func(k, v interface{}) bool {
-		id := k.(string)
-		writer := v.(*writer)
-
-		writers[id] = writer
-		return true
-	})
-
-	retval["writers"] = writers
 	return json.Marshal(retval)
 }
 
@@ -178,19 +167,13 @@ func NewMultiplex(ctx context.Context, r io.Reader, stopWhenNoWritersLeft bool) 
 	m.reader = r
 	m.stopWhenNoWritersLeft = stopWhenNoWritersLeft
 
-	m.writers = new(sync.Map)
+	m.cond = sync.NewCond(new(sync.Mutex))
+
 	m.writersCountMu = sync.RWMutex{}
 
 	m.marshallJSONMu = sync.Mutex{}
 
-	m.OnServeFinishedCallback = func() {}
-	m.OnWriterStopCallback = func() {}
-
 	m.Errors = make(chan error, errorsChanSize)
-
-	for i := 0; i < bufBucketsCount; i++ {
-		m.buf[i].payload = make([]byte, bufBucketSize)
-	}
 
 	return m
 }
@@ -198,14 +181,13 @@ func NewMultiplex(ctx context.Context, r io.Reader, stopWhenNoWritersLeft bool) 
 // Serve launches the reading loop. It reads data from io.Reader to buckets and puts
 // payload buckets numbers into writers channels (queues)
 func (m *Multiplex) Serve() error {
-	defer m.OnServeFinishedCallback()
 	var err error
+	var numBytesRead int
+	var readerPosition uint32
 
 	// The whole thing stops if this funcion exits
 	// as there is no point in running writers if this function isn't running.
 	// defer m.cancel()
-
-	bucketNo := 0
 
 	// Now start time
 	m.marshallJSONMu.Lock()
@@ -224,45 +206,27 @@ func (m *Multiplex) Serve() error {
 			// continue
 		}
 
+		readerPosition = atomic.LoadUint32(&m.readerPosition)
+
 		// read data to the payload of the current bucket
 		// also setting the number of bytes read.
-		m.buf[bucketNo].numBytes, err = m.reader.Read(m.buf[bucketNo].payload)
+		numBytesRead, err = m.reader.Read(m.buf[readerPosition:])
 		if err != nil && err != io.EOF {
 			// Exit if reader error occured and it is not EOF
 			return err
 		}
 
-		// Here it is a bit complicated: the thread-safe map has its own 'foreach' function.
-		// We iterate over our writers, putting the current bucket number to their queues.
-		m.writers.Range(func(k, v interface{}) bool {
-			id, _ := k.(string)
-			w, _ := v.(*writer)
-
-			if err == io.EOF {
-				// -1 is magic number that we use to notify the writer that EOF occured
-				w.queue <- -1
-				return true
-			}
-
-			// w.queue is a buffered channel, so we check if there still are free slots there
-			// if not: the reader is slow, we dont write any data to him
-			freeSlots := cap(w.queue) - len(w.queue)
-			if freeSlots < 2 { // we always reserve 1 slot for EOF message (-1)
-				m.reportError(NewErrorWriterSlow(id))
-				return true // return true here is an equivalent of 'continue' statement in forloop
-			}
-			w.stats.reportQueueLength(len(w.queue))
-			w.queue <- bucketNo
-			return true
-		})
-		if err == io.EOF {
-			return err
-		}
-		if bucketNo < bufBucketsCount-1 {
-			bucketNo++
+		if readerPosition+uint32(numBytesRead) == uint32(ringBufferSize) {
+			atomic.StoreUint32(&m.readerPosition, 0)
+		} else if m.readerPosition < ringBufferSize {
+			atomic.AddUint32(&m.readerPosition, uint32(numBytesRead))
 		} else {
-			bucketNo = 0
+			fmt.Println("Seems that we read more than the buffer size. Strange.")
 		}
+
+		m.cond.L.Lock()
+		m.cond.Broadcast()
+		m.cond.L.Unlock()
 	}
 }
 
@@ -276,27 +240,16 @@ func (m *Multiplex) Write(id string, w io.Writer) error {
 	ws := new(writer)
 	ws.stats = newWriterStats()
 
-	// here we derive a child context with cancel function and store the function in the writer struct
-	// so RemoveWriter can trigger the writer shutdown
-	if m == nil {
-		return fmt.Errorf("Write: the self object is nil. Something is terribly wrong")
-	}
-
-	if m.ctx == nil {
-		return fmt.Errorf("Write: context creation failed, parent context is nil")
-	}
+	var writerPosition uint32
+	var readerPosition uint32
+	var numBytes int
+	var err error
 
 	var ctx context.Context
 	ctx, ws.cancel = context.WithCancel(m.ctx)
 
-	// This buffered channel is used to receive slots from the reader routine
-	// It consumes the number of bucket with data
-	ws.queue = make(chan int, bufBucketsCount)
-	var bucketNo int
-
 	m.writersWg.Add(1)
 	defer m.writersWg.Done()
-	m.writers.Store(id, ws)
 
 	m.writersCountMu.Lock()
 	m.writersCount++
@@ -313,48 +266,48 @@ func (m *Multiplex) Write(id string, w io.Writer) error {
 			err := NewErrorContextDone(fmt.Sprintf("writer %s: context is done", id))
 			m.reportError(err)
 			return err
-		case bucketNo = <-ws.queue:
+		default:
 			// continue
 		}
 
-		if bucketNo == -1 {
-			return io.EOF // EOF received, nothing more to write
+		readerPosition = atomic.LoadUint32(&m.readerPosition)
+
+		for writerPosition == readerPosition {
+			ws.stats.reportQueueLength(0)
+			m.cond.L.Lock()
+			m.cond.Wait()
+			m.cond.L.Unlock()
+			readerPosition = atomic.LoadUint32(&m.readerPosition)
 		}
 
-		// This is ugly as hell, however we don't use any new variables here
-		// just for the sake of readability, saving couple of CPU cycles
-		numBytes, err := w.Write(m.buf[bucketNo].payload[:m.buf[bucketNo].numBytes])
-		if err != nil {
-			errWrite := NewErrorWrite(id, err.Error())
-			m.reportError(errWrite)
-			return errWrite
+		if writerPosition < readerPosition {
+			ws.stats.reportQueueLength(readerPosition - writerPosition)
+			numBytes, err = w.Write(m.buf[writerPosition:readerPosition])
+			if err != nil {
+				errWrite := NewErrorWrite(id, err.Error())
+				m.reportError(errWrite)
+				return errWrite
+			}
+			writerPosition = writerPosition + uint32(numBytes)
+		} else {
+			numBytes, err = w.Write(m.buf[writerPosition:])
+			if err != nil {
+				errWrite := NewErrorWrite(id, err.Error())
+				m.reportError(errWrite)
+				return errWrite
+			}
+			if writerPosition+uint32(numBytes) == uint32(ringBufferSize) {
+				writerPosition = 0
+			} else {
+				writerPosition = writerPosition + uint32(numBytes)
+			}
 		}
-
 		ws.stats.reportTransmittedBytes(numBytes)
 	}
 }
 
 // RemoveWriter thread-safely removes an io.Writer from receiving data.
 func (m *Multiplex) RemoveWriter(id string) {
-	// we dont check type-assertions here as we values
-	// put in the map always come from function arguments
-	// and have determined type
-	v, ok := m.writers.Load(id)
-	if !ok {
-		// seems we're trying to remove already removed writer here.
-		// just skipping
-		return
-	}
-	ws, _ := v.(*writer)
-
-	// cancelling the routine we're about to delete
-	ws.cancel()
-
-	m.writers.Delete(id)
-
-	m.writersCountMu.Lock()
-	defer m.writersCountMu.Unlock()
-	m.writersCount--
 
 	if m.stopWhenNoWritersLeft && m.writersCount == 0 {
 		m.cancel()

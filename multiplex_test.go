@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/phsm/multiplex"
-	merrors "github.com/phsm/multiplex/errors"
 )
 
 const (
@@ -163,9 +162,9 @@ func TestContextExit(t *testing.T) {
 	m := multiplex.NewMultiplex(ctx, f, false)
 	err = m.Serve()
 
-	_, ok := err.(merrors.ErrorContextDone)
+	_, ok := err.(multiplex.ErrorContextDone)
 	if !ok {
-		log.Fatal("Couldn't assert error to merrors.ErrorContextDone")
+		log.Fatal("Couldn't assert error to ErrorContextDone")
 	}
 	f.Close()
 
@@ -204,7 +203,7 @@ func TestWriterError(t *testing.T) {
 		if err == nil {
 			log.Fatal("didn't receive an error during write")
 		}
-		_, ok := err.(merrors.ErrorWrite)
+		_, ok := err.(multiplex.ErrorWrite)
 		if !ok {
 			log.Fatal("didn't receive error of ErrorWrite type")
 		}
@@ -234,7 +233,7 @@ func TestRemoveWriter(t *testing.T) {
 			t.Fatal("Unexpected nil value for error")
 		}
 
-		_, ok := err.(merrors.ErrorContextDone)
+		_, ok := err.(multiplex.ErrorContextDone)
 		if !ok {
 			t.Fatalf("Received wrong error type: %v", err)
 		}
@@ -271,7 +270,7 @@ func TestSlowWriter(t *testing.T) {
 			t.Fatal("Unexpected nil value for error")
 		}
 
-		_, ok := err.(merrors.ErrorContextDone)
+		_, ok := err.(multiplex.ErrorContextDone)
 		if !ok {
 			t.Fatalf("Received wrong error type: %v", err)
 		}
@@ -288,7 +287,7 @@ func TestSlowWriter(t *testing.T) {
 				t.Fatal("Unexpected nil value for error")
 			}
 
-			_, ok := err.(merrors.ErrorWriterSlow)
+			_, ok := err.(multiplex.ErrorWriterSlow)
 			if !ok {
 				t.Fatalf("Received wrong error type: %v", err)
 			}
